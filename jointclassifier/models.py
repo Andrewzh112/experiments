@@ -29,10 +29,10 @@ class Encoder(nn.Module):
 
 
 class Embedder(nn.Module):
-    def __init__(self, num_classes, latent_dim, hidden_dim):
+    def __init__(self, latent_dim, hidden_dim):
         super().__init__()
         self.embed = nn.Sequential(
-            nn.Linear(num_classes, hidden_dim),
+            nn.Linear(1, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, latent_dim)
         )
