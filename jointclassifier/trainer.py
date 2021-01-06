@@ -15,51 +15,67 @@ class Trainer:
                  checkpoint_dir, data_dir):
         super().__init__()
         self.encoder = Encoder(in_channels, multipler, x_latent_dim, hidden_dim, img_dim)
-        self.classifier = Encoder(in_channels, multipler, 1, hidden_dim, img_dim)
-        self.embedder = Embedder(y_latent_dim, hidden_dim)
+        self.classifier = Encoder(in_channels, multipler, num_classes, hidden_dim, img_dim, classifier=True)
+        self.embedder = Embedder(num_classes, y_latent_dim, hidden_dim)
         self.joiner = Joiner(x_latent_dim, y_latent_dim, hidden_dim)
         self.models = {'encoder': self.encoder, 'classifier': self.classifier, 'embedder': self.embedder, 'joiner': self.joiner}
 
         self.num_classes = num_classes
+        self.grad_clip = grad_clip
         self.checkpoint_dir = checkpoint_dir
         Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
         self.epochs = epochs
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.optimizer = torch.optim.Adam(chain(*[m.parameters() for m in self.models.values()]), lr=lr)
-        self.train_loader = DataLoader(CombinedMNIST(data_dir + '/train.csv'), batch_size=batch_size,
-                                       shuffle=True)
-
-    def training_step(self, batch):
-        x1, x2, y = batch
-        x1, x2, y = x1.to(self.device), x2.to(self.device), y.to(self.device)
-
-        # normal x_y
-        x_y = self.joiner(self.encoder(x1), self.embedder(y))
-
-        # classified x_y
-        y_hat = self.classifier(x2)
-        x_y_hat = self.joiner(self.encoder(x2), self.embedder(y_hat))
-
-        loss = x_y_hat.mean() - x_y.mean()
-        return loss
+        self.optimizer_disc = torch.optim.Adam(chain(*[m.parameters() for name, m in self.models.items() if name != 'classifier']), lr=lr)
+        self.optimizer_cls = torch.optim.Adam(self.classifier.parameters(), lr=lr)
+        self.train_loader = DataLoader(CombinedMNIST(data_dir + '/train.csv'), batch_size=batch_size, shuffle=True)
 
     def fit(self):
         pbar = tqdm(range(self.epochs))
         iterations = 0
         for epoch in pbar:
-            losses = 0
-            for i, batch in enumerate(self.train_loader):
-                loss = self.training_step(batch)
-                self.optimizer.zero_grad()
-                loss.backward()
+            disc_losses, cls_losses = 0, 0
+            for i, (x1, x2, y) in enumerate(self.train_loader):
+                iterations += 1
+
+                #########################
+                # Training Discriminator#
+                #########################
+                x1, x2, y = x1.to(self.device), x2.to(self.device), y.to(self.device)
+
+                # normal x_y
+                y_oh = torch.zeros(y.size(0), self.num_classes, device=y.device)
+                y_oh.scatter_(1, y.long(), 1)
+                x_y = self.joiner(self.encoder(x1), self.embedder(y_oh))
+
+                # classified x_y
+                y_hat = self.classifier(x2)
+                x_y_hat = self.joiner(self.encoder(x2), self.embedder(y_hat))
+
+                # update params
+                disc_loss = x_y_hat.mean() - x_y.mean()
+                self.optimizer_disc.zero_grad()
+                disc_loss.backward(retain_graph=True)
                 for _, model in self.models.items():
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1, norm_type='inf')
-                self.optimizer.step()
-                iterations += i
-                pbar.set_postfix({'Loss': round(loss.item(), 3), 'Iteration': iterations})
-                losses += loss.item()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.grad_clip, norm_type='inf')
+                self.optimizer_disc.step()
+                disc_losses += disc_loss.item()
+
+                ######################
+                # Training Classifier#
+                ######################
+                self.optimizer_cls.zero_grad()
+                # cls_loss = -y_hat[:, y.flatten().long()].mean()
+                cls_loss = -(y_hat * y_oh).mean() * 1000
+                cls_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.classifier.parameters(), self.grad_clip, norm_type='inf')
+                self.optimizer_cls.step()
+
+                pbar.set_postfix({'Discriminator Loss': round(disc_loss.item(), 3), 'Classifier Loss': round(cls_loss.item(), 3), 'Iteration': iterations})
+
             tqdm.write(
                 f'Epoch {epoch + 1}/{self.epochs}, \
-                    Train Loss: {losses / (i + 1):.3f}'
+                    Discriminator Loss: {disc_losses / (i + 1):.3f}, \
+                        Classifier Loss: {cls_losses / (i + 1):.3f}'
             )
             torch.save({model.state_dict() for name, model in self.models.items()}, self.checkpoint_dir)
