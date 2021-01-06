@@ -4,8 +4,9 @@ from torch.nn import functional as F
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels, multipler, latent_dim, hidden_dim, img_dim):
+    def __init__(self, in_channels, multipler, latent_dim, hidden_dim, img_dim, classifier=False):
         super().__init__()
+        self.classifier = classifier
         self.conv1 = nn.Conv2d(in_channels, multipler, kernel_size=3, stride=2, padding=1)
         self.conv2 = nn.Conv2d(multipler, multipler * 2, kernel_size=3, stride=1, padding=1)
         self.conv3 = nn.Conv2d(multipler * 2, multipler * 4, kernel_size=3, stride=2, padding=1)
@@ -25,14 +26,17 @@ class Encoder(nn.Module):
         x = F.relu(self.bn4(self.conv4(x)))
         x = self.conv5(x).view(x.size(0), -1)
         x = F.relu(self.fc1(x))
-        return self.fc2(x)
+        x = self.fc2(x)
+        if self.classifier:
+            x = F.softmax(x, -1)
+        return x
 
 
 class Embedder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim):
+    def __init__(self, num_classes, latent_dim, hidden_dim):
         super().__init__()
         self.embed = nn.Sequential(
-            nn.Linear(1, hidden_dim),
+            nn.Linear(num_classes, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, latent_dim)
         )
