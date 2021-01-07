@@ -7,11 +7,12 @@ from pathlib import Path
 from jointclassifier.data import CombinedMNIST
 from jointclassifier.models import Encoder, Embedder, Joiner
 
+torch.autograd.set_detect_anomaly(True)
 
 class Trainer:
     def __init__(self, x_latent_dim, y_latent_dim, hidden_dim,
                  in_channels, multipler, img_dim, num_classes,
-                 lr, epochs, batch_size, grad_clip,
+                 lr, epochs, batch_size, grad_clip, weight_decay,
                  checkpoint_dir, data_dir):
         super().__init__()
         self.encoder = Encoder(in_channels, multipler, x_latent_dim, hidden_dim, img_dim)
@@ -26,8 +27,8 @@ class Trainer:
         Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
         self.epochs = epochs
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.optimizer_disc = torch.optim.Adam(chain(*[m.parameters() for name, m in self.models.items() if name != 'classifier']), lr=lr)
-        self.optimizer_cls = torch.optim.Adam(self.classifier.parameters(), lr=lr)
+        self.optimizer_disc = torch.optim.Adam(chain(*[m.parameters() for name, m in self.models.items() if name != 'classifier']), lr=lr, weight_decay=weight_decay)
+        self.optimizer_cls = torch.optim.Adam(self.classifier.parameters(), lr=lr, weight_decay=weight_decay)
         self.train_loader = DataLoader(CombinedMNIST(data_dir + '/train.csv'), batch_size=batch_size, shuffle=True)
 
     def fit(self):
@@ -50,7 +51,7 @@ class Trainer:
 
                 # classified x_y
                 y_hat = self.classifier(x2)
-                x_y_hat = self.joiner(self.encoder(x2), self.embedder(y_hat))
+                x_y_hat = self.joiner(self.encoder(x2), self.embedder(y_hat.detach()))
 
                 # update params
                 disc_loss = x_y_hat.mean() - x_y.mean()
@@ -64,14 +65,18 @@ class Trainer:
                 ######################
                 # Training Classifier#
                 ######################
+                x_y_hat = self.joiner(self.encoder(x2), self.embedder(y_hat))
+                cls_loss = -x_y_hat.mean()
                 self.optimizer_cls.zero_grad()
-                # cls_loss = -y_hat[:, y.flatten().long()].mean()
-                cls_loss = -(y_hat * y_oh).mean() * 1000
                 cls_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.classifier.parameters(), self.grad_clip, norm_type='inf')
                 self.optimizer_cls.step()
+                cls_losses += cls_loss.item()
 
-                pbar.set_postfix({'Discriminator Loss': round(disc_loss.item(), 3), 'Classifier Loss': round(cls_loss.item(), 3), 'Iteration': iterations})
+                pbar.set_postfix({
+                    'Discriminator Loss': round(disc_loss.item(), 3),
+                    'Classifier Loss': round(cls_loss.item(), 3),
+                    'Iteration': iterations})
 
             tqdm.write(
                 f'Epoch {epoch + 1}/{self.epochs}, \
