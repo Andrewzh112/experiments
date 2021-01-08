@@ -4,10 +4,9 @@ from tqdm import tqdm
 from itertools import chain
 from pathlib import Path
 
-from jointclassifier.data import CombinedMNIST
+from jointclassifier.data import CombinedMNIST, MNIST
 from jointclassifier.models import Encoder, Embedder, Joiner
 
-torch.autograd.set_detect_anomaly(True)
 
 class Trainer:
     def __init__(self, x_latent_dim, y_latent_dim, hidden_dim,
@@ -24,18 +23,24 @@ class Trainer:
         self.num_classes = num_classes
         self.grad_clip = grad_clip
         self.checkpoint_dir = checkpoint_dir
-        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+        Path('/'.join(checkpoint_dir.split('/')[:-1])).mkdir(parents=True, exist_ok=True)
         self.epochs = epochs
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.optimizer_disc = torch.optim.Adam(chain(*[m.parameters() for name, m in self.models.items() if name != 'classifier']), lr=lr, weight_decay=weight_decay)
         self.optimizer_cls = torch.optim.Adam(self.classifier.parameters(), lr=lr, weight_decay=weight_decay)
-        self.train_loader = DataLoader(CombinedMNIST(data_dir + '/train.csv'), batch_size=batch_size, shuffle=True)
+        self.train_loader = DataLoader(CombinedMNIST(data_dir + '/train.csv', num_classes), batch_size=batch_size, shuffle=True)
+        self.test_loader = DataLoader(MNIST(data_dir + '/train.csv'), batch_size=batch_size, shuffle=False)
+
+        for model in self.models.values():
+            model.to(self.device)
 
     def fit(self):
         pbar = tqdm(range(self.epochs))
         iterations = 0
         for epoch in pbar:
             disc_losses, cls_losses = 0, 0
+            for model in self.models.values():
+                model.train()
             for i, (x1, x2, y) in enumerate(self.train_loader):
                 iterations += 1
 
@@ -53,12 +58,13 @@ class Trainer:
                 y_hat = self.classifier(x2)
                 x_y_hat = self.joiner(self.encoder(x2), self.embedder(y_hat.detach()))
 
-                # update params
+                # update params, clip heuristic enforce 1lipschitz
                 disc_loss = x_y_hat.mean() - x_y.mean()
                 self.optimizer_disc.zero_grad()
                 disc_loss.backward(retain_graph=True)
-                for _, model in self.models.items():
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.grad_clip, norm_type='inf')
+                if self.grad_clip is not None:
+                    for _, model in self.models.items():
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), self.grad_clip, norm_type='inf')
                 self.optimizer_disc.step()
                 disc_losses += disc_loss.item()
 
@@ -69,18 +75,32 @@ class Trainer:
                 cls_loss = -x_y_hat.mean()
                 self.optimizer_cls.zero_grad()
                 cls_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.classifier.parameters(), self.grad_clip, norm_type='inf')
+                if self.grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(self.classifier.parameters(), self.grad_clip, norm_type='inf')
                 self.optimizer_cls.step()
                 cls_losses += cls_loss.item()
 
                 pbar.set_postfix({
-                    'Discriminator Loss': round(disc_loss.item(), 3),
-                    'Classifier Loss': round(cls_loss.item(), 3),
-                    'Iteration': iterations})
+                    'Iteration': iterations,
+                    'Discriminator Loss': disc_loss.item(),
+                    'Classifier Loss': cls_loss.item(),
+                    'x_y': x_y.mean().item(),
+                    'x_y_hat': x_y_hat.mean().item()})
 
+            # Testing classifier
+            for model in self.models.values():
+                model.eval()
+            corrects, samples = 0, 0
+            for x, y in self.test_loader:
+                x, y = x.to(self.device), y.to(self.device)
+                with torch.no_grad():
+                    y_hat = self.classifier(x)
+                corrects += (y_hat.argmax(1) == y).sum()
+                samples += y.size(0)
             tqdm.write(
                 f'Epoch {epoch + 1}/{self.epochs}, \
                     Discriminator Loss: {disc_losses / (i + 1):.3f}, \
-                        Classifier Loss: {cls_losses / (i + 1):.3f}'
+                        Classifier Loss: {cls_losses / (i + 1):.3f}, \
+                        Accuracy: {corrects * 100 / samples:.3f}%'
             )
-            torch.save({model.state_dict() for name, model in self.models.items()}, self.checkpoint_dir)
+            torch.save({name: model.state_dict() for name, model in self.models.items()}, self.checkpoint_dir)

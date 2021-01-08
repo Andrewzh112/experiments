@@ -20,3 +20,18 @@ class CombinedMNIST(Dataset):
             torch.from_numpy(digit1).view(1, 28, 28).float(),
             torch.from_numpy(digit2).view(1, 28, 28).float(),
             torch.tensor([label]).float())
+
+class MNIST(Dataset):
+    def __init__(self, data_path):
+        self.dataset = pd.read_csv(data_path)
+
+    def __len__(self):
+        return self.dataset.shape[0]
+
+    def __getitem__(self, idx):
+        data = self.dataset.iloc[idx, :]
+        label = data.iloc[0]
+        digit = data.iloc[1:].values
+        return (
+            torch.from_numpy(digit).view(1, 28, 28).float(),
+            torch.tensor(label))
